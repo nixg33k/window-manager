@@ -20,6 +20,9 @@ const NET_WM_STATE_HIDDEN: &str = "_NET_WM_STATE_HIDDEN";
 const NET_WM_STATE_MAXIMIZED_HORZ: &str = "_NET_WM_STATE_MAXIMIZED_HORZ";
 const NET_WM_STATE_MAXIMIZED_VERT: &str = "_NET_WM_STATE_MAXIMIZED_VERT";
 const NET_WM_STATE_FULLSCREEN: &str = "_NET_WM_STATE_FULLSCREEN";
+const NET_WM_WINDOW_TYPE: &str = "_NET_WM_WINDOW_TYPE";
+const NET_WM_WINDOW_TYPE_DESKTOP: &str = "_NET_WM_WINDOW_TYPE_DESKTOP";
+const NET_WM_WINDOW_TYPE_DOCK: &str = "_NET_WM_WINDOW_TYPE_DOCK";
 const WM_NAME: &str = "WM_NAME";
 const WM_CLASS: &str = "WM_CLASS";
 const UTF8_STRING: &str = "UTF8_STRING";
@@ -152,6 +155,26 @@ fn get_app_name(
     "(unknown)".to_string()
 }
 
+/// Returns true if the window is a desktop or dock (panel/taskbar) window.
+///
+/// These should never be captured or restored — they are managed by the desktop
+/// environment and moving them breaks the display (e.g. Nemo-desktop drifting to
+/// a wrong monitor).
+fn is_desktop_or_dock(
+    conn: &xcb::Connection,
+    window: xcb::x::Window,
+    net_wm_window_type: xcb::x::Atom,
+    desktop_atom: xcb::x::Atom,
+    dock_atom: xcb::x::Atom,
+) -> bool {
+    if let Ok(types) = get_property_u32(conn, window, net_wm_window_type, 8) {
+        let id = desktop_atom.resource_id();
+        let dock_id = dock_atom.resource_id();
+        return types.contains(&id) || types.contains(&dock_id);
+    }
+    false
+}
+
 /// Determine the window state from _NET_WM_STATE atoms.
 fn get_window_state(
     conn: &xcb::Connection,
@@ -211,6 +234,9 @@ pub fn capture_windows() -> Result<Vec<WindowInfo>> {
     let wm_class = intern_atom(&conn, WM_CLASS)?;
     let utf8_string = intern_atom(&conn, UTF8_STRING)?;
     let string_atom = intern_atom(&conn, STRING)?;
+    let net_wm_window_type = intern_atom(&conn, NET_WM_WINDOW_TYPE)?;
+    let wm_type_desktop = intern_atom(&conn, NET_WM_WINDOW_TYPE_DESKTOP)?;
+    let wm_type_dock = intern_atom(&conn, NET_WM_WINDOW_TYPE_DOCK)?;
 
     // Get the list of client windows from _NET_CLIENT_LIST on the root window
     let client_list_cookie = conn.send_request(&xcb::x::GetProperty {
@@ -230,6 +256,11 @@ pub fn capture_windows() -> Result<Vec<WindowInfo>> {
     let mut windows = Vec::new();
 
     for &win in &window_ids {
+        // Skip desktop and dock (panel/taskbar) windows — the WM owns these
+        if is_desktop_or_dock(&conn, win, net_wm_window_type, wm_type_desktop, wm_type_dock) {
+            continue;
+        }
+
         // Get window geometry
         let geom_cookie = conn.send_request(&xcb::x::GetGeometry {
             drawable: xcb::x::Drawable::Window(win),
