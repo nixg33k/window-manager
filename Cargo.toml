@@ -1,0 +1,39 @@
+[package]
+name = "window-manager"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool to capture and restore window layouts on Linux (X11 & Wayland)"
+license = "MIT"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# JSON serialization/deserialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Home directory resolution
+dirs = "5"
+
+# Error handling
+anyhow = "1"
+
+# Colored terminal output
+colored = "2"
+
+# Chrono for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# X11 support via xcb
+xcb = { version = "1", features = ["randr"] }
+
+# Wayland support
+wayland-client = "0.31"
+wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+
+# For running external commands (wmctrl/xdotool fallback, and wayland tools)
+which = "6"
+
+# Hostname detection
+hostname = "0.4"
