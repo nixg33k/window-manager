@@ -317,53 +317,93 @@ pub fn restore_windows(windows: &[WindowInfo]) -> Result<()> {
     restore_with_wmctrl(windows)
 }
 
+/// Parse `wmctrl -lx` output into a map of lowercase class name -> list of window IDs.
+///
+/// wmctrl -lx output format per line:
+///   <win_id>  <desktop>  <instance.Class>  <hostname>  <title...>
+fn wmctrl_class_map() -> std::collections::HashMap<String, Vec<String>> {
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+    let Ok(out) = Command::new("wmctrl").args(["-lx"]).output() else {
+        return map;
+    };
+
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let cols: Vec<&str> = line.splitn(5, |c: char| c.is_ascii_whitespace())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // cols: [win_id, desktop, instance.Class, hostname, title...]
+        if cols.len() < 3 {
+            continue;
+        }
+        let win_id = cols[0].to_string();
+        // WM_CLASS is "instance.Class" — extract the class part (after the dot)
+        let class = cols[2].splitn(2, '.').nth(1).unwrap_or(cols[2]).to_lowercase();
+        map.entry(class).or_default().push(win_id);
+    }
+
+    map
+}
+
 /// Restore windows using `wmctrl`.
 ///
-/// wmctrl provides the `-r` flag to select a window by name/class and `-e` to
-/// set its geometry: `-e gravity,x,y,width,height`.
+/// Looks up live window IDs via `wmctrl -lx`, matches by WM_CLASS, then uses
+/// `-i -r <id> -e gravity,x,y,w,h` to reposition each window by ID.
 fn restore_with_wmctrl(windows: &[WindowInfo]) -> Result<()> {
+    let class_map = wmctrl_class_map();
+
+    // Track how many times we've matched each class so duplicate app instances
+    // are assigned to successive saved windows in order.
+    let mut match_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
     for win in windows {
         println!("  Restoring: {} ({})", win.title, win.app_name);
 
-        // First, move the window to the correct workspace
+        let class_key = win.app_name.to_lowercase();
+        let ids = class_map.get(&class_key);
+
+        let Some(ids) = ids else {
+            println!("    (no live window found for class '{}')", win.app_name);
+            continue;
+        };
+
+        let idx = match_index.entry(class_key.clone()).or_insert(0);
+        let Some(win_id) = ids.get(*idx) else {
+            println!("    (no more live windows for class '{}')", win.app_name);
+            continue;
+        };
+        *idx += 1;
+
+        // Move to the correct workspace
         if win.workspace >= 0 {
             let _ = Command::new("wmctrl")
-                .args(["-r", &win.app_name, "-t", &win.workspace.to_string()])
+                .args(["-i", "-r", win_id, "-t", &win.workspace.to_string()])
                 .output();
         }
 
-        // Handle window state before moving
         match win.state {
             WindowState::Minimized => {
-                // wmctrl can't easily minimize; skip geometry for minimized windows
                 println!("    (skipping geometry for minimized window)");
                 continue;
             }
             WindowState::Maximized => {
-                // Remove maximized state first, then set geometry, then re-maximize
                 let _ = Command::new("wmctrl")
-                    .args([
-                        "-r",
-                        &win.app_name,
-                        "-b",
-                        "remove,maximized_vert,maximized_horz",
-                    ])
+                    .args(["-i", "-r", win_id, "-b", "remove,maximized_vert,maximized_horz"])
                     .output();
             }
             WindowState::Fullscreen => {
                 let _ = Command::new("wmctrl")
-                    .args(["-r", &win.app_name, "-b", "remove,fullscreen"])
+                    .args(["-i", "-r", win_id, "-b", "remove,fullscreen"])
                     .output();
             }
             WindowState::Normal => {}
         }
 
-        // Set the window geometry: -e gravity,x,y,w,h (gravity 0 = use default)
         let geometry = format!("0,{},{},{},{}", win.x, win.y, win.width, win.height);
         let status = Command::new("wmctrl")
-            .args(["-r", &win.app_name, "-e", &geometry])
+            .args(["-i", "-r", win_id, "-e", &geometry])
             .output()
-            .with_context(|| format!("Failed to run wmctrl for '{}'", win.app_name))?;
+            .with_context(|| format!("Failed to run wmctrl for window {}", win_id))?;
 
         if !status.status.success() {
             eprintln!(
@@ -373,21 +413,15 @@ fn restore_with_wmctrl(windows: &[WindowInfo]) -> Result<()> {
             );
         }
 
-        // Re-apply maximized or fullscreen state
         match win.state {
             WindowState::Maximized => {
                 let _ = Command::new("wmctrl")
-                    .args([
-                        "-r",
-                        &win.app_name,
-                        "-b",
-                        "add,maximized_vert,maximized_horz",
-                    ])
+                    .args(["-i", "-r", win_id, "-b", "add,maximized_vert,maximized_horz"])
                     .output();
             }
             WindowState::Fullscreen => {
                 let _ = Command::new("wmctrl")
-                    .args(["-r", &win.app_name, "-b", "add,fullscreen"])
+                    .args(["-i", "-r", win_id, "-b", "add,fullscreen"])
                     .output();
             }
             _ => {}
